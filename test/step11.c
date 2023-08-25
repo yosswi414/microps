@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <stdlib.h>
 #include <stddef.h>
 #include <signal.h>
 #include <unistd.h>
@@ -67,6 +68,9 @@ int main(int argc, char* argv[]) {
     uint16_t id, seq = 0;
     size_t offset = IP_HDR_SIZE_MIN + ICMP_HDR_SIZE;
 
+    size_t maxcnt = 1 << 30, lpcnt = 0;
+    if (argc == 2) maxcnt = strtol(argv[1], NULL, 10);
+
     if(setup()== -1){
         errorf("setup() failed");
         return -1;
@@ -77,14 +81,16 @@ int main(int argc, char* argv[]) {
     id = getpid() % UINT16_MAX; // PID から id を採番
 
     // 1 秒おきにデバイスにパケット (test_data) を書き込む
-    while(!terminate) {
+    while (++lpcnt, !terminate) {
         // if(net_device_output(dev, NET_PROTOCOL_TYPE_IP, test_data, sizeof(test_data), NULL) == -1){
         // if(ip_output(IP_PROTOCOL_ICMP, test_data + offset, sizeof(test_data) - offset, src, dst) == -1) {
         if(icmp_output(ICMP_TYPE_ECHO, 0, hton32(id << 16 | ++seq), test_data + offset, sizeof(test_data) - offset, src, dst) == -1){
             errorf("icmp_output() failed");
             break;
         }
-        sleep(1);
+        if (lpcnt >= maxcnt) break;
+        // usleep(10 * 1000);
+        usleep(1000 * 1000);
     }
     cleanup();
     return 0;
