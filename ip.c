@@ -252,7 +252,7 @@ static void ip_input(const uint8_t* data, size_t len, struct net_device* dev){
     struct ip_protocol* proto;
     for (proto = protocols; proto; proto = proto->next){
         if(proto->type == hdr->protocol){
-            proto->handler(data, total - hlen, hdr->src, hdr->dst, iface);
+            proto->handler(data + hlen, len - hlen, hdr->src, hdr->dst, iface);
             return;
         }
     }
