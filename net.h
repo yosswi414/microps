@@ -28,8 +28,14 @@
 #define NET_PROTOCOL_TYPE_ARP   0x0806
 #define NET_PROTOCOL_TYPE_IPV6  0x86dd
 
+#define NET_IFACE_FAMILY_IP     1
+#define NET_IFACE_FAMILY_IPV6   2
+
+#define NET_IFACE(x)    ((struct net_iface*)(x))
+
 struct net_device {
     struct net_device* next;
+    struct net_iface* ifaces;   // You need to protect ifaces with mutex to add/delete entries after net_run()
     unsigned int index;
     char name[IFNAMSIZ];
 
@@ -59,8 +65,18 @@ struct net_device_ops {
     );
 };
 
+struct net_iface {
+    struct net_iface* next;
+    struct net_device* dev; // backward pointer to parent
+    int family; // dependent on the implementation of each protocol
+};
+
 extern struct net_device* net_device_alloc(void);
 extern int net_device_register(struct net_device* dev);
+
+extern int net_device_add_iface(struct net_device* dev, struct net_iface* iface);
+extern struct net_iface* net_device_get_iface(struct net_device* dev, int family);
+
 extern int net_device_output(
     struct net_device*      dev,
     uint16_t                type,

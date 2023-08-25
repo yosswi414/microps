@@ -58,16 +58,20 @@ int net_device_register(struct net_device *dev){
 }
 
 static int net_device_open(struct net_device* dev){
-    if(NET_DEVICE_IS_UP(dev)) {
+    debugf("ndo 1 dev=%s", dev->name);
+    if (NET_DEVICE_IS_UP(dev)) {
         errorf("device already open, dev=%s", dev->name);
         return -1;
     }
+    debugf("ndo 2");
     if(dev->ops->open){
-        if(dev->ops->open(dev) == -1){
+        debugf("ndo 2-1 %08x", dev->ops->open);
+        if (dev->ops->open(dev) == -1) {
             errorf("open() failed, dev=%s", dev->name);
             return -1;
         }
     }
+    debugf("ndo 3");
     dev->flags |= NET_DEVICE_FLAG_UP;
     infof("dev=%s, state=%s", dev->name, NET_DEVICE_STATE(dev));
     return 0;
@@ -87,6 +91,38 @@ static int net_device_close(struct net_device* dev){
     dev->flags &= ~NET_DEVICE_FLAG_UP;
     infof("dev=%s, state=%s", dev->name, NET_DEVICE_STATE(dev));
     return 0;
+}
+
+// This should not be called after net_run()
+int net_device_add_iface(struct net_device* dev, struct net_iface* iface){
+    struct net_iface* entry;
+
+    // 重複登録の確認
+    for (entry = dev->ifaces; entry; entry = entry->next){
+        if(entry->family == iface->family){
+            // 重複あり
+            // 簡単のためここでは 1 つのデバイスにつき同一 family のインタフェースは
+            // 1 つまで登録されるものとする
+            errorf("already registered family detected, dev=%s, family=%d", dev->name, entry->family);
+            return -1;
+        }
+    }
+    iface->dev = dev;
+    // Exercise 7-1: デバイスのインタフェースリストの先頭に iface を挿入
+    iface->next = dev->ifaces;
+    dev->ifaces = iface;
+    // Exercise 7-1
+    return 0;
+}
+
+struct net_iface* net_device_get_iface(struct net_device* dev, int family){
+    // Exercise 7-2: デバイスに紐づくインタフェースを検索
+    struct net_iface* iface;
+    for (iface = dev->ifaces; iface; iface = iface->next){
+        if (iface->family == family) return iface;
+    }
+    return NULL;
+    // Exercise 7-2
 }
 
 int net_device_output(
