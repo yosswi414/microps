@@ -8,6 +8,7 @@
 #include "util.h"
 #include "net.h"
 #include "ip.h"
+#include "icmp.h"
 
 struct net_protocol{
     struct net_protocol* next;
@@ -267,6 +268,12 @@ int net_init(void){
         errorf("ip_init() failed");
         return -1;
     }
+    // Exercise 9-5: ICMP の初期化関数を呼び出す
+    if (icmp_init() == -1) {
+        errorf("icmp_init() failed");
+        return -1;
+    }
+    // Exercise 9-5
     infof("initialized");
     return 0;
 }
