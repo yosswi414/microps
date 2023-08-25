@@ -63,11 +63,49 @@ char* ip_addr_ntop(ip_addr_t n, char* p, size_t size){
     return p;
 }
 
-void ip_dump(const uint8_t* data, size_t len){
+// void ip_dump(const uint8_t* data, size_t len){
+//     struct ip_hdr* hdr;
+//     uint8_t v, hl, hlen;
+//     uint16_t total, offset;
+//     char addr[IP_ADDR_STR_LEN];
+//
+//     hdr = (struct ip_hdr*)data;
+//     v = (hdr->vhl & 0xf0) >> 4;
+//     hl = hdr->vhl & 0x0f;
+//     hlen = hl << 2;  // 32bit unit -> 8bit unit
+//     total = ntoh16(hdr->total);
+//     offset = ntoh16(hdr->offset);
+//     flockfile(stderr);
+//     {
+//         fprintf(stderr, "  IP |      vhl: 0x%02x [v: %u, hl: %u (%u)]\n", hdr->vhl, v, hl, hlen);
+//         fprintf(stderr, "  IP |      tos: 0x%02x\n", hdr->tos);
+//         fprintf(stderr, "  IP |    total: %u (payload: %u)\n", total, total - hlen);
+//         fprintf(stderr, "  IP |       id: %u\n", ntoh16(hdr->id));
+//         fprintf(stderr, "  IP |   offset: 0x%04x [flags=%x, offset=%u]\n", offset, (offset & 0xe000) >> 13, offset & 0x1fff);
+//         fprintf(stderr, "  IP |      ttl: %u\n", hdr->ttl);
+//         fprintf(stderr, "  IP | protocol: %u\n", hdr->protocol);
+//         fprintf(stderr, "  IP |      sum: 0x%04x\n", ntoh16(hdr->sum));
+//         fprintf(stderr, "  IP |      src: %s\n", ip_addr_ntop(hdr->src, addr, sizeof(addr)));
+//         fprintf(stderr, "  IP |      dst: %s\n", ip_addr_ntop(hdr->dst, addr, sizeof(addr)));
+// #ifdef HEXDUMP
+//         hexdump(stderr, data, len);
+//         #endif
+//     }
+//     funlockfile(stderr);
+// }
+
+// inout: 0: none, > 0: in, < 0: out
+void ip_dump(const uint8_t* data, size_t len, int inout) {
     struct ip_hdr* hdr;
     uint8_t v, hl, hlen;
     uint16_t total, offset;
     char addr[IP_ADDR_STR_LEN];
+    char arrows[3][5] = {"    ", "I>> ", "O<< "};
+    char* arrow;
+    if (inout < 0)
+        arrow = arrows[2];
+    else
+        arrow = arrows[inout > 0];
 
     hdr = (struct ip_hdr*)data;
     v = (hdr->vhl & 0xf0) >> 4;
@@ -75,21 +113,22 @@ void ip_dump(const uint8_t* data, size_t len){
     hlen = hl << 2;  // 32bit unit -> 8bit unit
     total = ntoh16(hdr->total);
     offset = ntoh16(hdr->offset);
+
     flockfile(stderr);
     {
-        fprintf(stderr, "      vhl: 0x%02x [v: %u, hl: %u (%u)]\n", hdr->vhl, v, hl, hlen);
-        fprintf(stderr, "      tos: 0x%02x\n", hdr->tos);
-        fprintf(stderr, "    total: %u (payload: %u)\n", total, total - hlen);
-        fprintf(stderr, "       id: %u\n", ntoh16(hdr->id));
-        fprintf(stderr, "   offset: 0x%04x [flags=%x, offset=%u]\n", offset, (offset & 0xe000) >> 13, offset & 0x1fff);
-        fprintf(stderr, "      ttl: %u\n", hdr->ttl);
-        fprintf(stderr, " protocol: %u\n", hdr->protocol);
-        fprintf(stderr, "      sum: 0x%04x\n", ntoh16(hdr->sum));
-        fprintf(stderr, "      src: %s\n", ip_addr_ntop(hdr->src, addr, sizeof(addr)));
-        fprintf(stderr, "      dst: %s\n", ip_addr_ntop(hdr->dst, addr, sizeof(addr)));
-        #ifdef HEXDUMP
+        fprintf(stderr, "%s  IP |      vhl: 0x%02x [v: %u, hl: %u (%u)]\n", arrow, hdr->vhl, v, hl, hlen);
+        fprintf(stderr, "%s  IP |      tos: 0x%02x\n", arrow, hdr->tos);
+        fprintf(stderr, "%s  IP |    total: %u (payload: %u)\n", arrow, total, total - hlen);
+        fprintf(stderr, "%s  IP |       id: %u\n", arrow, ntoh16(hdr->id));
+        fprintf(stderr, "%s  IP |   offset: 0x%04x [flags=%x, offset=%u]\n", arrow, offset, (offset & 0xe000) >> 13, offset & 0x1fff);
+        fprintf(stderr, "%s  IP |      ttl: %u\n", arrow, hdr->ttl);
+        fprintf(stderr, "%s  IP | protocol: %u\n", arrow, hdr->protocol);
+        fprintf(stderr, "%s  IP |      sum: 0x%04x\n", arrow, ntoh16(hdr->sum));
+        fprintf(stderr, "%s  IP |      src: %s\n", arrow, ip_addr_ntop(hdr->src, addr, sizeof(addr)));
+        fprintf(stderr, "%s  IP |      dst: %s\n", arrow, ip_addr_ntop(hdr->dst, addr, sizeof(addr)));
+#ifdef HEXDUMP
         hexdump(stderr, data, len);
-        #endif
+#endif
     }
     funlockfile(stderr);
 }
@@ -191,6 +230,7 @@ static void ip_input(const uint8_t* data, size_t len, struct net_device* dev){
     uint16_t hlen, total, offset;
     struct ip_iface* iface;
     char addr[IP_ADDR_STR_LEN];
+    const int inout = 1; // input
 
     if(len < IP_HDR_SIZE_MIN){
         errorf("length too short (< IP_HDR_SIZE_MIN)");
@@ -246,7 +286,7 @@ static void ip_input(const uint8_t* data, size_t len, struct net_device* dev){
 
     debugf("dev=%s, iface=%s, protocol=%u, total=%u",
            dev->name, ip_addr_ntop(iface->unicast, addr, sizeof(addr)), hdr->protocol, total);
-    ip_dump(data, total);
+    ip_dump(data, total, inout);
 
     // Exercise 9-3: プロトコルの検索
     struct ip_protocol* proto;
@@ -287,13 +327,13 @@ static ssize_t ip_output_core(struct ip_iface* iface, uint8_t protocol, const ui
     struct ip_hdr* hdr;
     uint16_t hlen, total;
     char addr[IP_ADDR_STR_LEN];
+    const int inout = -1; // output
 
     hdr = (struct ip_hdr*)buf;
     // Exercise 8-3: IP データグラム生成
     // IP ヘッダの各フィールドに値を設定
     hlen = IP_HDR_SIZE_MIN;
     total = IP_HDR_SIZE_MIN + len;
-    debugf("len = %d, total = %d", len, total);
     hdr->vhl = IP_VERSION_IPV4 << 4 | hlen >> 2;
     hdr->tos = 0;
     hdr->total = hton16(total);
@@ -310,7 +350,7 @@ static ssize_t ip_output_core(struct ip_iface* iface, uint8_t protocol, const ui
     // Exercise 8-3
     debugf("dev=%s, dst=%s, protocol=%u, len=%u",
            NET_IFACE(iface)->dev->name, ip_addr_ntop(dst, addr, sizeof(addr)), protocol, total);
-    ip_dump(buf, total);
+    ip_dump(buf, total, inout);
     // 生成した IP データグラムを実際にデバイスから送信するための関数に渡す
     return ip_output_device(iface, buf, total, dst);
 }
