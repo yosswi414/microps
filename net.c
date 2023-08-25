@@ -58,20 +58,16 @@ int net_device_register(struct net_device *dev){
 }
 
 static int net_device_open(struct net_device* dev){
-    debugf("ndo 1 dev=%s", dev->name);
-    if (NET_DEVICE_IS_UP(dev)) {
+    if(NET_DEVICE_IS_UP(dev)) {
         errorf("device already open, dev=%s", dev->name);
         return -1;
     }
-    debugf("ndo 2");
     if(dev->ops->open){
-        debugf("ndo 2-1 %08x", dev->ops->open);
-        if (dev->ops->open(dev) == -1) {
+        if(dev->ops->open(dev) == -1){
             errorf("open() failed, dev=%s", dev->name);
             return -1;
         }
     }
-    debugf("ndo 3");
     dev->flags |= NET_DEVICE_FLAG_UP;
     infof("dev=%s, state=%s", dev->name, NET_DEVICE_STATE(dev));
     return 0;

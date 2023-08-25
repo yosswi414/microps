@@ -2,6 +2,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "platform.h"
 
@@ -210,6 +211,109 @@ static void ip_input(const uint8_t* data, size_t len, struct net_device* dev){
     debugf("dev=%s, iface=%s, protocol=%u, total=%u",
            dev->name, ip_addr_ntop(iface->unicast, addr, sizeof(addr)), hdr->protocol, total);
     ip_dump(data, total);
+}
+
+static int ip_output_device(struct ip_iface* iface, const uint8_t* data, size_t len, ip_addr_t dst){
+    uint8_t hwaddr[NET_DEVICE_ADDR_LEN] = {};
+
+    // ARP によるアドレス解決が必要な場合
+    if(NET_IFACE(iface)->dev->flags & NET_DEVICE_FLAG_NEED_ARP){
+        // 宛先がブロードキャスト IP アドレスの場合は解決を行わず、
+        // そのデバイスのブロードキャスト HW アドレスを用いる
+        if(dst == iface->broadcast || dst == IP_ADDR_BROADCAST){
+            memcpy(hwaddr, NET_IFACE(iface)->dev->broadcast, NET_IFACE(iface)->dev->alen);
+        }
+        else{
+            errorf("arp to be supported");
+            return -1;
+        }
+    }
+
+    // Exercise 8-4: デバイスから送信
+    return net_device_output(NET_IFACE(iface)->dev, NET_PROTOCOL_TYPE_IP, data, len, NULL);
+    // Exercise 8-4
+}
+
+static ssize_t ip_output_core(struct ip_iface* iface, uint8_t protocol, const uint8_t* data, size_t len, ip_addr_t src, ip_addr_t dst, uint16_t id, uint16_t offset){
+    uint8_t buf[IP_TOTAL_SIZE_MAX];
+    struct ip_hdr* hdr;
+    uint16_t hlen, total;
+    char addr[IP_ADDR_STR_LEN];
+
+    hdr = (struct ip_hdr*)buf;
+    // Exercise 8-3: IP データグラム生成
+    // IP ヘッダの各フィールドに値を設定
+    hlen = IP_HDR_SIZE_MIN;
+    total = IP_HDR_SIZE_MIN + len;
+    debugf("len = %d, total = %d", len, total);
+    hdr->vhl = IP_VERSION_IPV4 << 4 | hlen >> 2;
+    hdr->tos = 0;
+    hdr->total = hton16(total);
+    hdr->id = hton16(id);
+    hdr->offset = hton16(offset);
+    hdr->ttl = 255;
+    hdr->protocol = protocol;
+    hdr->src = src;
+    hdr->dst = dst;
+    hdr->sum = 0;
+    hdr->sum = cksum16((uint16_t*)hdr, sizeof(*hdr), 0);
+    // IP ヘッダの直後にデータを配置
+    memcpy(hdr + 1, data, len);
+    // Exercise 8-3
+    debugf("dev=%s, dst=%s, protocol=%u, len=%u",
+           NET_IFACE(iface)->dev->name, ip_addr_ntop(dst, addr, sizeof(addr)), protocol, total);
+    ip_dump(buf, total);
+    // 生成した IP データグラムを実際にデバイスから送信するための関数に渡す
+    return ip_output_device(iface, buf, total, dst);
+}
+
+static uint16_t ip_generate_id(void){
+    static mutex_t mutex = MUTEX_INITIALIZER;
+    static uint16_t id = 128;
+    uint16_t ret;
+
+    mutex_lock(&mutex);
+    ret = id++;
+    mutex_unlock(&mutex);
+    return ret;
+}
+
+ssize_t ip_output(uint8_t protocol, const uint8_t* data, size_t len, ip_addr_t src, ip_addr_t dst){
+    struct ip_iface* iface;
+    char addr[IP_ADDR_STR_LEN];
+    uint16_t id;
+
+    if(src == IP_ADDR_ANY){
+        errorf("ip routing to be supported");
+        return -1;
+    }
+    else {  // to be revised
+        // Exercise 8-1: IP インタフェースの検索
+        if(!(iface = ip_iface_select(src))){
+            errorf("IP interface not found, src: %s", ip_addr_ntop(src, addr, sizeof(addr)));
+            return -1;
+        }
+        // Exercise 8-1
+        // Exercise 8-2: 宛先へ到達可能か確認
+        if((iface->unicast & iface->netmask) ^ (dst & iface->netmask) && dst != IP_ADDR_BROADCAST){
+            errorf("unreachable IP, dst=%s", ip_addr_ntop(dst, addr, sizeof(addr)));
+            return -1;
+        }
+        // Exercise 8-2
+    }
+    // フラグメンテーションをサポートしないので、MTU を超える場合はエラー
+    if(NET_IFACE(iface)->dev->mtu < IP_HDR_SIZE_MIN + len) {
+        errorf("too large, dev=%s, mtu=%u < %zu",
+               NET_IFACE(iface)->dev->name, NET_IFACE(iface)->dev->mtu, IP_HDR_SIZE_MIN + len);
+        return -1;
+    }
+    id = ip_generate_id();  // IP データグラムの ID を採番
+    // IP データグラムを生成して出力するための関数を呼び出す
+    if (ip_output_core(iface, protocol, data, len, iface->unicast, dst, id, 0) == -1){
+        errorf("ip_output_core() failed");
+        return -1;
+    }
+    return len;
 }
 
 int ip_init(void){
