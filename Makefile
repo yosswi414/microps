@@ -8,7 +8,7 @@ OBJS = util.o \
 		 ip.o \
 	   icmp.o \
 
-TESTS = $(patsubst %.c, %.exe, $(shell find . -type f -name "step*"))
+TESTS = $(patsubst %.c, %.exe, $(shell find . -type f -name "step*.c"))
 
 CFLAGS := $(CFLAGS) -g -W -Wall -Wno-unused-parameter -iquote .
 

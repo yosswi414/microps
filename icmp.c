@@ -1,10 +1,12 @@
-#include "icmp.h"
-
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 #include "ip.h"
 #include "util.h"
+#include "icmp.h"
+
+#define ICMP_BUFSIZ IP_PAYLOAD_SIZE_MAX
 
 struct icmp_hdr {
     uint8_t type;
@@ -87,6 +89,8 @@ void icmp_input(const uint8_t* data, size_t len, ip_addr_t src, ip_addr_t dst, s
     char addr1[IP_ADDR_STR_LEN];
     char addr2[IP_ADDR_STR_LEN];
 
+    hdr = (struct icmp_hdr*)data;
+
     // Exercise 10-1: ICMP メッセージの検証
     if(len < ICMP_HDR_SIZE){
         errorf("length %u too short (< ICMP_HDR_SIZE = %u)", len, ICMP_HDR_SIZE);
@@ -104,6 +108,64 @@ void icmp_input(const uint8_t* data, size_t len, ip_addr_t src, ip_addr_t dst, s
            ip_addr_ntop(dst, addr2, sizeof(addr2)),
            len);
     icmp_dump(data, len);
+
+    switch(hdr->type){
+        case ICMP_TYPE_ECHO:
+            // responds with the addressof the received interface
+            // Exercise 11-3: ICMP の出力関数を呼び出す
+            if(icmp_output(ICMP_TYPE_ECHOREPLY, hdr->code, hdr->values,
+                (uint8_t*)(hdr + 1), len - sizeof(*hdr), iface->unicast, src) < 0){
+                errorf("icmp_output() failed");
+                return;
+            }
+            // Exercise 11-3
+            break;
+        default:
+            // unsupported type
+            break;
+    }
+}
+
+int icmp_output(
+    uint8_t type,
+    uint8_t code,
+    uint32_t values,
+    const uint8_t* data,
+    size_t len,
+    ip_addr_t src,
+    ip_addr_t dst
+){
+    uint8_t buf[ICMP_BUFSIZ];
+    struct icmp_hdr* hdr;
+    size_t msg_len; // ICMP メッセージの長さ (header + data)
+    char addr1[IP_ADDR_STR_LEN];
+    char addr2[IP_ADDR_STR_LEN];
+
+    hdr = (struct icmp_hdr*)buf;
+
+    // Exercise 11-1: ICMP メッセージの生成
+    // header
+    hdr->type = type;
+    hdr->code = code;
+    hdr->values = values;   // no need to hton*()
+    hdr->sum = 0;
+    // data
+    memcpy(hdr + 1, data, len);
+    // length
+    msg_len = sizeof(*hdr) + len;
+    // checksum
+    hdr->sum = cksum16((uint16_t*)buf, msg_len, 0);
+    // Exercise 11-1
+
+    debugf("%s => %s, len=%zu",
+           ip_addr_ntop(src, addr1, sizeof(addr1)),
+           ip_addr_ntop(dst, addr2, sizeof(addr2)),
+           msg_len);
+    icmp_dump(buf, msg_len);
+
+    // Exercise 11-2: IP の出力関数を呼び出してメッセージを送信
+    return ip_output(IP_PROTOCOL_ICMP, buf, msg_len, src, dst);
+    // Exercise 11-2
 }
 
 int icmp_init(void) {
