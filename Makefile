@@ -7,6 +7,8 @@ OBJS = util.o \
 		net.o \
 		 ip.o \
 	   icmp.o \
+	  ether.o \
+	    arp.o \
 
 TESTS = $(patsubst %.c, %.exe, $(shell find . -type f -name "step*.c"))
 
@@ -16,6 +18,7 @@ ifeq ($(shell uname),Linux)
   # Linux specific settings
   BASE = platform/linux
   CFLAGS := $(CFLAGS) -pthread -iquote $(BASE)
+  DRIVERS := $(DRIVERS) $(BASE)/driver/ether_tap.o
   OBJS := $(OBJS) $(BASE)/intr.o
 endif
 
