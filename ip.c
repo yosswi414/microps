@@ -9,6 +9,7 @@
 #include "util.h"
 #include "net.h"
 #include "ip.h"
+#include "arp.h"
 
 struct ip_hdr {
     uint8_t vhl;    // Version (4bit), IHL (4bit)
@@ -303,6 +304,7 @@ static void ip_input(const uint8_t* data, size_t len, struct net_device* dev){
 
 static int ip_output_device(struct ip_iface* iface, const uint8_t* data, size_t len, ip_addr_t dst){
     uint8_t hwaddr[NET_DEVICE_ADDR_LEN] = {};
+    int ret;
 
     // ARP によるアドレス解決が必要な場合
     if(NET_IFACE(iface)->dev->flags & NET_DEVICE_FLAG_NEED_ARP){
@@ -312,13 +314,14 @@ static int ip_output_device(struct ip_iface* iface, const uint8_t* data, size_t 
             memcpy(hwaddr, NET_IFACE(iface)->dev->broadcast, NET_IFACE(iface)->dev->alen);
         }
         else{
-            errorf("arp to be supported");
-            return -1;
+            // Exercise 14-5: arp_resolve() を呼び出してアドレス解決
+            if ((ret = arp_resolve(NET_IFACE(iface), dst, hwaddr)) != ARP_RESOLVE_FOUND) return ret;
+            // Exercise 14-5
         }
     }
 
     // Exercise 8-4: デバイスから送信
-    return net_device_output(NET_IFACE(iface)->dev, NET_PROTOCOL_TYPE_IP, data, len, NULL);
+    return net_device_output(NET_IFACE(iface)->dev, NET_PROTOCOL_TYPE_IP, data, len, hwaddr);
     // Exercise 8-4
 }
 
