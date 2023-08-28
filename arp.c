@@ -45,11 +45,20 @@ struct arp_ether_ip {
     uint8_t tpa[IP_ADDR_LEN];     // target protocol address
 };
 
+struct arp_wait_queue {
+    struct arp_wait_queue* next;
+    struct ip_iface* iface;
+    uint8_t* data;
+    size_t len;
+};
+
 struct arp_cache {
     unsigned char state;
     ip_addr_t pa;
     uint8_t ha[ETHER_ADDR_LEN];
     struct timeval timestamp;
+    struct arp_wait_queue* queue;
+    size_t que_len;
 };
 
 static mutex_t mutex = MUTEX_INITIALIZER;
@@ -98,6 +107,33 @@ static void arp_dump(const uint8_t* data, size_t len, int inout) {
     funlockfile(stderr);
 }
 
+static int arp_queue_push(struct arp_cache* cache, struct arp_wait_queue* que){
+    if (!cache || !que) return -1;
+    que->next = cache->queue;
+    cache->queue = que;
+    ++cache->que_len;
+    return 0;
+}
+
+static void arp_queue_pop(struct arp_cache* cache) {
+    if (!cache) return;
+    struct arp_wait_queue* entry;
+    char addr[ETHER_ADDR_LEN];
+    entry = cache->queue->next;
+    debugf("IP packet deleted: dev=%s, ha=%s, len=%zu",
+           NET_IFACE(cache->queue->iface)->dev->name,
+           ether_addr_ntop(cache->ha, addr, sizeof(addr)),
+           cache->queue->len);
+    memory_free(cache->queue->data);
+    memory_free(cache->queue);
+    cache->queue = entry;
+    --cache->que_len;
+}
+
+static int arp_queue_is_empty(struct arp_cache* cache) {
+    return cache->queue == NULL && cache->que_len == 0 ? 1 : 0;
+}
+
 /*
  *  ARP Cache
  *
@@ -112,6 +148,7 @@ static void arp_cache_delete(struct arp_cache* cache) {
            ether_addr_ntop(cache->ha, addr2, sizeof(addr2)));
     
     // Exercise 14-1: キャッシュのエントリを削除
+    while (!arp_queue_is_empty(cache)) arp_queue_pop(cache);
     memset(cache, 0, sizeof(*cache));
     // cache->state = ARP_CACHE_STATE_FREE;
     // Exercise 14-1
@@ -143,6 +180,8 @@ static struct arp_cache* arp_cache_select(ip_addr_t pa) {
 static struct arp_cache* arp_cache_update(ip_addr_t pa, const uint8_t* ha) {
     struct arp_cache* cache;
     char addr1[IP_ADDR_STR_LEN], addr2[ETHER_ADDR_STR_LEN];
+    int ret;
+    struct arp_wait_queue* que;
 
     // Exercise 14-3: キャッシュに登録されている情報を更新する
     if (!(cache = arp_cache_select(pa))) return NULL;
@@ -154,6 +193,26 @@ static struct arp_cache* arp_cache_update(ip_addr_t pa, const uint8_t* ha) {
     debugf("UPDATE: pa=%s, ha=%s",
            ip_addr_ntop(pa, addr1, sizeof(addr1)),
            ether_addr_ntop(ha, addr2, sizeof(addr2)));
+
+    debugf("# of IP packets on queue: %zu packets", cache->que_len);
+
+    while (!arp_queue_is_empty(cache)) {
+        que = cache->queue;
+        if (!que->data) errorf("data points NULL");
+        else{
+            debugf("IP packet popped: dev=%s, ha=%s, len=%zu",
+                   NET_IFACE(que->iface)->dev->name,
+                   ether_addr_ntop(cache->ha, addr2, sizeof(addr2)),
+                   que->len);
+            ret = net_device_output(NET_IFACE(que->iface)->dev, NET_PROTOCOL_TYPE_IP, que->data, que->len, cache->ha);
+            if (ret == -1)
+                errorf("net_device_output() failed");
+            else
+                debugf("IP packet sent from queue successfully");
+        }
+        arp_queue_pop(cache);
+    }
+
     return cache;
 }
 
@@ -176,6 +235,37 @@ static struct arp_cache* arp_cache_insert(ip_addr_t pa, const uint8_t* ha) {
            ip_addr_ntop(pa, addr1, sizeof(addr1)),
            ether_addr_ntop(ha, addr2, sizeof(addr2)));
     return cache;
+}
+
+int arp_queue_register(struct ip_iface* iface, const uint8_t* data, size_t len, ip_addr_t dst) {
+    struct arp_cache* entry;
+    struct arp_wait_queue* que;
+    char addr[IP_ADDR_STR_LEN];
+
+    if (!(entry = arp_cache_select(dst))) {
+        errorf("no such IP address on queue, addr=%s", ip_addr_ntop(dst, addr, sizeof(addr)));
+        return -1;
+    }
+
+    if (!(que = memory_alloc(sizeof(*que)))) {
+        errorf("memory_alloc() failed");
+        return -1;
+    }
+    if (!(que->data = memory_alloc(len))) {
+        errorf("memory_alloc() failed");
+        return -1;
+    }
+    que->iface = iface;
+    memcpy(que->data, data, len);
+    que->len = len;
+
+    if(arp_queue_push(entry, que) == -1){
+        errorf("arp_queue_push() failed");
+        return -1;
+    }
+    debugf("IP packet queued: dev=%s, dst=%s, len=%zu", NET_IFACE(iface)->dev->name, ip_addr_ntop(dst, addr, sizeof(addr)), len);
+
+    return 0;
 }
 
 static int arp_request(struct net_iface* iface, ip_addr_t tpa){

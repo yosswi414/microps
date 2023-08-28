@@ -315,7 +315,13 @@ static int ip_output_device(struct ip_iface* iface, const uint8_t* data, size_t 
         }
         else{
             // Exercise 14-5: arp_resolve() を呼び出してアドレス解決
-            if ((ret = arp_resolve(NET_IFACE(iface), dst, hwaddr)) != ARP_RESOLVE_FOUND) return ret;
+            if ((ret = arp_resolve(NET_IFACE(iface), dst, hwaddr)) != ARP_RESOLVE_FOUND) {
+                debugf("arp record not found.");
+                if(arp_queue_register(iface, data, len, dst) == -1){
+                    errorf("arp_add_queue() failed.");
+                }
+                return ret;
+            }
             // Exercise 14-5
         }
     }
