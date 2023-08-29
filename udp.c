@@ -18,6 +18,10 @@
 #define UDP_PCB_STATE_OPEN 1
 #define UDP_PCB_STATE_CLOSING 2
 
+// ref: https://tools.ietf.org/html/rfc6335
+#define UDP_SOURCE_PORT_MIN 49152
+#define UDP_SOURCE_PORT_MAX 65535
+
 struct pseudo_hdr {
     uint32_t src;
     uint32_t dst;
@@ -37,6 +41,7 @@ struct udp_pcb {
     int state;
     struct ip_endpoint local;  // 自分のアドレス/ポート番号
     struct queue_head queue;
+    int wc; // wait count (PCB を使用中のスレッド数)
 };
 
 struct udp_queue_entry {
@@ -91,6 +96,12 @@ static struct udp_pcb* udp_pcb_alloc(void) {
 
 static void udp_pcb_release(struct udp_pcb* pcb) {
     struct queue_entry* entry;
+
+    // 使用中スレッドが存在するためクローズを保留
+    if(pcb->wc){
+        pcb->state = UDP_PCB_STATE_CLOSING;
+        return;
+    }
 
     pcb->state = UDP_PCB_STATE_FREE;
     pcb->local.addr = IP_ADDR_ANY;
@@ -304,6 +315,94 @@ int udp_bind(int id, struct ip_endpoint* local){
 
     debugf("bound, id=%d, local=%s", id, ip_endpoint_ntop(&pcb->local, ep[0], sizeof(ep[0])));
     return 0;
+}
+
+ssize_t udp_sendto(int id, uint8_t* data, size_t len, struct ip_endpoint* foreign){
+    struct udp_pcb* pcb;
+    struct ip_endpoint local;
+    struct ip_iface* iface;
+    char addr[IP_ADDR_STR_LEN];
+    uint32_t p;
+
+    mutex_lock(&mutex);
+    {
+        if(!(pcb = udp_pcb_get(id))){
+            errorf("pcb not found, id=%d", id);
+            MEXIT(-1);
+        }
+        local.addr = pcb->local.addr;
+        // 自分の使用アドレスがワイルドカードの場合、宛先アドレスに応じて送信元アドレスを自動的に選択
+        if(local.addr==IP_ADDR_ANY){
+            // IP の経路情報から宛先に到達可能なインタフェースを取得
+            if(!(iface = ip_route_get_iface(foreign->addr))){
+                errorf("iface by which foreign address is reachable not found, addr=%s",
+                       ip_addr_ntop(foreign->addr, addr, sizeof(addr)));
+                MEXIT(-1);
+            }
+            // 取得したインタフェースのアドレスを使用
+            local.addr = iface->unicast;
+            debugf("selected local address, addr=%s",
+                   ip_addr_ntop(local.addr, addr, sizeof(addr)));
+        }
+
+        // 自分の使用ポートが設定されていない場合、送信元ポート番号を自動的に選択
+        if(!pcb->local.port){
+            // 未使用ポートを線形探索して使用ポートに設定
+            for (p = UDP_SOURCE_PORT_MIN; p <= UDP_SOURCE_PORT_MAX;++p){
+                if(!udp_pcb_select(local.addr, hton16(p))){
+                    pcb->local.port = hton16(p);
+                    debugf("local port dynamically assigned, port=%d", p);
+                    break;
+                }
+            }
+            // 未使用ポート無しの場合
+            if(!pcb->local.port){
+                debugf("failed to find assignable local port, addr=%s",
+                       ip_addr_ntop(local.addr, addr, sizeof(addr)));
+                MEXIT(-1);
+            }
+        }
+        local.port = pcb->local.port;
+    }
+    mutex_unlock(&mutex);
+    return udp_output(&local, foreign, data, len);
+}
+
+ssize_t udp_recvfrom(int id, uint8_t* buf, size_t size, struct ip_endpoint* foreign){
+    struct udp_pcb* pcb;
+    struct udp_queue_entry* entry;
+    ssize_t len;
+
+    mutex_lock(&mutex); // PCB access
+    {
+        if(!(pcb = udp_pcb_get(id))){
+            errorf("pcb not found, id=%d", id);
+            MEXIT(-1);
+        }
+        // 受信キューからエントリを取り出す
+        while(!(entry = queue_pop(&pcb->queue))){
+            ++pcb->wc;
+            // 受信キューへのエントリ追加を待つ
+            {
+                mutex_unlock(&mutex);
+                sleep(1);
+                mutex_lock(&mutex);
+            }
+            --pcb->wc;
+            if(pcb->state == UDP_PCB_STATE_CLOSING){
+                debugf("PCB closed");
+                udp_pcb_release(pcb);
+                MEXIT(-1);
+            }
+        }
+    }
+    mutex_unlock(&mutex);
+
+    if (foreign) *foreign = entry->foreign; // 送信元のアドレス/ポートをコピー
+    len = MIN(size, entry->len);    // truncate
+    memcpy(buf, entry->data, len);
+    memory_free(entry);
+    return len;
 }
 
 int udp_close(int id) {
