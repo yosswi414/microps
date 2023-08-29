@@ -10,6 +10,7 @@ OBJS = util.o \
 	  ether.o \
 	    arp.o \
 		udp.o \
+		tcp.o \
 
 TESTS = $(patsubst %.c, %.exe, $(shell find . -type f -name "step*.c"))
 

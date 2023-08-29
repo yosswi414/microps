@@ -12,6 +12,7 @@
 #include "icmp.h"
 #include "arp.h"
 #include "udp.h"
+#include "tcp.h"
 
 struct net_protocol{
     struct net_protocol* next;
@@ -303,6 +304,7 @@ int net_event_handler(void){
     struct net_event* event;
     // イベントを講読しているすべてのハンドラを呼び出す
     for (event = events; event; event = event->next) event->handler(event->arg);
+    return 0;
 }
 
 void net_raise_event(void) {
@@ -367,6 +369,13 @@ int net_init(void){
         return -1;
     }
     // Exercise 18-4
+
+    // Exercise 22-2: TCP の初期化関数を呼び出す
+    if (tcp_init() == -1) {
+        errorf("tcp_init() failed");
+        return -1;
+    }
+    // Exercise 22-2
 
     infof("initialized");
     return 0;
