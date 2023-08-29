@@ -1,5 +1,6 @@
 #include "udp.h"
 
+#include <errno.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -41,7 +42,8 @@ struct udp_pcb {
     int state;
     struct ip_endpoint local;  // 自分のアドレス/ポート番号
     struct queue_head queue;
-    int wc; // wait count (PCB を使用中のスレッド数)
+    // int wc; // wait count (PCB を使用中のスレッド数)
+    struct sched_ctx ctx;  // スケジューラが使うコンテキスト
 };
 
 struct udp_queue_entry {
@@ -88,6 +90,7 @@ static struct udp_pcb* udp_pcb_alloc(void) {
     for (pcb = pcbs; pcb < tailof(pcbs); ++pcb) {
         if (pcb->state == UDP_PCB_STATE_FREE) {
             pcb->state = UDP_PCB_STATE_OPEN;
+            sched_ctx_init(&pcb->ctx);  // コンテキスト初期化
             return pcb;
         }
     }
@@ -97,9 +100,17 @@ static struct udp_pcb* udp_pcb_alloc(void) {
 static void udp_pcb_release(struct udp_pcb* pcb) {
     struct queue_entry* entry;
 
+    /*
     // 使用中スレッドが存在するためクローズを保留
     if(pcb->wc){
         pcb->state = UDP_PCB_STATE_CLOSING;
+        return;
+    }
+    */
+    pcb->state = UDP_PCB_STATE_CLOSING;  // すぐに FREE になるとは限らない
+    // エラー(-1) なら休止中のタスクが存在するので起床させてクローズ中であることを知らせる
+    if (sched_ctx_destroy(&pcb->ctx) == -1) {
+        sched_wakeup(&pcb->ctx);
         return;
     }
 
@@ -140,7 +151,7 @@ static int udp_pcb_id(struct udp_pcb* pcb) {
 #define MEXIT(x)              \
     do {                      \
         mutex_unlock(&mutex); \
-        return x;            \
+        return x;             \
     } while (0)
 
 static void udp_input(const uint8_t* data, size_t len, ip_addr_t src, ip_addr_t dst, struct ip_iface* iface) {
@@ -180,7 +191,6 @@ static void udp_input(const uint8_t* data, size_t len, ip_addr_t src, ip_addr_t 
            len, len - sizeof(*hdr));
     udp_dump(data, len, 1);
 
-
     mutex_lock(&mutex);  // PCB へのアクセス
     {
         if (!(pcb = udp_pcb_select(dst, hdr->dst))) {  // 宛先アドレスとポート番号に対応する PCB を検索
@@ -207,6 +217,7 @@ static void udp_input(const uint8_t* data, size_t len, ip_addr_t src, ip_addr_t 
         // Exercise 19-1
 
         debugf("[PCB] queue pushed: id=%d, num=%d", udp_pcb_id(pcb), pcb->queue.num);
+        sched_wakeup(&pcb->ctx);  // 受信キューへのエントリ追加を通知するため起床させる
     }
     mutex_unlock(&mutex);
 }
@@ -262,9 +273,28 @@ ssize_t udp_output(struct ip_endpoint* src, struct ip_endpoint* dst, const uint8
     return len;
 }
 
+static void event_handler(void* arg) {
+    struct udp_pcb* pcb;
+
+    (void)arg;
+    mutex_lock(&mutex);
+    {
+        for (pcb = pcbs; pcb < tailof(pcbs); ++pcb) {
+            // 有効な PCB のコンテキスト全てに割り込み発生
+            if (pcb->state == UDP_PCB_STATE_OPEN) sched_interrupt(&pcb->ctx);
+        }
+    }
+    mutex_unlock(&mutex);
+}
+
 int udp_init(void) {
     if (ip_protocol_register(IP_PROTOCOL_UDP, udp_input) == -1) {
         errorf("ip_protocol_register() failed");
+        return -1;
+    }
+    // イベントの講読 (ハンドラを設定)
+    if (net_event_subscribe(event_handler, NULL) == -1) {
+        errorf("net_event_subscribe() failed");
         return -1;
     }
 
@@ -289,18 +319,18 @@ int udp_open(void) {
     return udp_pcb_id(pcb);
 }
 
-int udp_bind(int id, struct ip_endpoint* local){
+int udp_bind(int id, struct ip_endpoint* local) {
     struct udp_pcb *pcb, *exist;
     char ep[2][IP_ENDPOINT_STR_LEN];
 
     mutex_lock(&mutex);
     {
         // Exercise 19-4: UDP ソケットへアドレスとポート番号を紐付け
-        if(!(pcb = udp_pcb_get(id))){
+        if (!(pcb = udp_pcb_get(id))) {
             errorf("[PCB] id=%d not yet allocated");
             MEXIT(-1);
         }
-        if((exist = udp_pcb_select(local->addr, local->port))){
+        if ((exist = udp_pcb_select(local->addr, local->port))) {
             errorf("[PCB] pair of IP and port already in use: endpoint=%s, id=%d",
                    ip_endpoint_ntop(&exist->local, ep[0], sizeof(ep[0])),
                    udp_pcb_id(exist));
@@ -317,7 +347,7 @@ int udp_bind(int id, struct ip_endpoint* local){
     return 0;
 }
 
-ssize_t udp_sendto(int id, uint8_t* data, size_t len, struct ip_endpoint* foreign){
+ssize_t udp_sendto(int id, uint8_t* data, size_t len, struct ip_endpoint* foreign) {
     struct udp_pcb* pcb;
     struct ip_endpoint local;
     struct ip_iface* iface;
@@ -326,15 +356,15 @@ ssize_t udp_sendto(int id, uint8_t* data, size_t len, struct ip_endpoint* foreig
 
     mutex_lock(&mutex);
     {
-        if(!(pcb = udp_pcb_get(id))){
+        if (!(pcb = udp_pcb_get(id))) {
             errorf("pcb not found, id=%d", id);
             MEXIT(-1);
         }
         local.addr = pcb->local.addr;
         // 自分の使用アドレスがワイルドカードの場合、宛先アドレスに応じて送信元アドレスを自動的に選択
-        if(local.addr==IP_ADDR_ANY){
+        if (local.addr == IP_ADDR_ANY) {
             // IP の経路情報から宛先に到達可能なインタフェースを取得
-            if(!(iface = ip_route_get_iface(foreign->addr))){
+            if (!(iface = ip_route_get_iface(foreign->addr))) {
                 errorf("iface by which foreign address is reachable not found, addr=%s",
                        ip_addr_ntop(foreign->addr, addr, sizeof(addr)));
                 MEXIT(-1);
@@ -346,17 +376,17 @@ ssize_t udp_sendto(int id, uint8_t* data, size_t len, struct ip_endpoint* foreig
         }
 
         // 自分の使用ポートが設定されていない場合、送信元ポート番号を自動的に選択
-        if(!pcb->local.port){
+        if (!pcb->local.port) {
             // 未使用ポートを線形探索して使用ポートに設定
-            for (p = UDP_SOURCE_PORT_MIN; p <= UDP_SOURCE_PORT_MAX;++p){
-                if(!udp_pcb_select(local.addr, hton16(p))){
+            for (p = UDP_SOURCE_PORT_MIN; p <= UDP_SOURCE_PORT_MAX; ++p) {
+                if (!udp_pcb_select(local.addr, hton16(p))) {
                     pcb->local.port = hton16(p);
                     debugf("local port dynamically assigned, port=%d", p);
                     break;
                 }
             }
             // 未使用ポート無しの場合
-            if(!pcb->local.port){
+            if (!pcb->local.port) {
                 debugf("failed to find assignable local port, addr=%s",
                        ip_addr_ntop(local.addr, addr, sizeof(addr)));
                 MEXIT(-1);
@@ -368,19 +398,21 @@ ssize_t udp_sendto(int id, uint8_t* data, size_t len, struct ip_endpoint* foreig
     return udp_output(&local, foreign, data, len);
 }
 
-ssize_t udp_recvfrom(int id, uint8_t* buf, size_t size, struct ip_endpoint* foreign){
+ssize_t udp_recvfrom(int id, uint8_t* buf, size_t size, struct ip_endpoint* foreign) {
     struct udp_pcb* pcb;
     struct udp_queue_entry* entry;
     ssize_t len;
+    int err;
 
-    mutex_lock(&mutex); // PCB access
+    mutex_lock(&mutex);  // PCB access
     {
-        if(!(pcb = udp_pcb_get(id))){
+        if (!(pcb = udp_pcb_get(id))) {
             errorf("pcb not found, id=%d", id);
             MEXIT(-1);
         }
         // 受信キューからエントリを取り出す
-        while(!(entry = queue_pop(&pcb->queue))){
+        while (!(entry = queue_pop(&pcb->queue))) {
+            /*
             ++pcb->wc;
             // 受信キューへのエントリ追加を待つ
             {
@@ -389,7 +421,17 @@ ssize_t udp_recvfrom(int id, uint8_t* buf, size_t size, struct ip_endpoint* fore
                 mutex_lock(&mutex);
             }
             --pcb->wc;
-            if(pcb->state == UDP_PCB_STATE_CLOSING){
+            */
+
+            // sched_wakeup() または sched_interrupt() が呼ばれるまで休止
+            // エラー -> sched_interrupt() による起床なので EINTR を返す
+            if ((err = sched_sleep(&pcb->ctx, &mutex, NULL))) {
+                debugf("interrupted");
+                errno = EINTR;
+                MEXIT(-1);
+            }
+
+            if (pcb->state == UDP_PCB_STATE_CLOSING) {
                 debugf("PCB closed");
                 udp_pcb_release(pcb);
                 MEXIT(-1);
@@ -398,8 +440,8 @@ ssize_t udp_recvfrom(int id, uint8_t* buf, size_t size, struct ip_endpoint* fore
     }
     mutex_unlock(&mutex);
 
-    if (foreign) *foreign = entry->foreign; // 送信元のアドレス/ポートをコピー
-    len = MIN(size, entry->len);    // truncate
+    if (foreign) *foreign = entry->foreign;  // 送信元のアドレス/ポートをコピー
+    len = MIN(size, entry->len);             // truncate
     memcpy(buf, entry->data, len);
     memory_free(entry);
     return len;

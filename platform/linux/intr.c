@@ -121,10 +121,15 @@ static void* intr_thread(void* arg){
             case SIGUSR1:
                 net_softirq_handler();
                 break;
+            // SIGUSR2: イベント用
+            case SIGUSR2:
+                net_event_handler();
+                break;
             // SIGALRM: 周期処理用タイマー発火時用
             case SIGALRM:
                 net_timer_handler();
                 break;
+            
             // IRQ リストを巡回し、IRQ 番号が一致するエントリのハンドラを呼び出す
             default:
                 for (entry = irqs; entry;entry=entry->next){
@@ -181,6 +186,7 @@ int intr_init(void){
     sigemptyset(&sigmask);  // シグナル集合の初期化 (空)
     sigaddset(&sigmask, SIGHUP);    // 割り込みスレッド終了通知用に SIGHUP を追加
     sigaddset(&sigmask, SIGUSR1);   // ソフトウェア割り込み用
+    sigaddset(&sigmask, SIGUSR2);   // イベント用
     sigaddset(&sigmask, SIGALRM);   // 周期処理用タイマー発火時用
     return 0;
 }

@@ -21,7 +21,7 @@ ifeq ($(shell uname),Linux)
   CFLAGS := $(CFLAGS) -pthread -iquote $(BASE)
   LDFLAGS := $(LDFLAGS)	-lrt
   DRIVERS := $(DRIVERS) $(BASE)/driver/ether_tap.o
-  OBJS := $(OBJS) $(BASE)/intr.o
+  OBJS := $(OBJS) $(BASE)/intr.o $(BASE)/sched.o
 endif
 
 ifeq ($(shell uname),Darwin)
